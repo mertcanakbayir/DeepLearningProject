@@ -4,6 +4,7 @@ import os
 import requests
 from PIL import Image
 from io import BytesIO
+from datetime import datetime, timedelta
 
 ee.Authenticate()
 ee.Initialize(project="eedeneme1")
@@ -14,11 +15,11 @@ def get_city_images(
     start_radius=5000,
     end_radius=10000,
     step=1000,
-    num_images=5,
     lat=None,
     lon=None,
     start_date="2023-01-01",
-    end_date="2023-12-31"
+    end_date="2023-12-31",
+    cloud_threshold=20
 ):
     # Koordinatları alma
     if lat is None or lon is None:
@@ -31,42 +32,51 @@ def get_city_images(
 
     point = ee.Geometry.Point(lon, lat)
     
-    # Yarıçap aralığını oluştur
+    # Tarih aralıkları
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    intervals = []
+    current_dt = start_dt
+    while current_dt < end_dt:
+        next_dt = current_dt + timedelta(days=30)
+        if next_dt > end_dt:
+            next_dt = end_dt
+        interval_start = current_dt.strftime("%Y-%m-%d")
+        interval_end = next_dt.strftime("%Y-%m-%d")
+        intervals.append((interval_start, interval_end))
+        current_dt = next_dt
+    
     radii = range(start_radius, end_radius + step, step)
     
-    # Her yarıçap için işlem yap
     for radius in radii:
         print(f"\n{radius//1000} km yarıçap ile işleniyor...")
-        
-        # Geometriyi oluştur
         area = point.buffer(radius).bounds()
         
-        # Koleksiyonu filtrele
-        collection = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(point)
-            .filterDate(start_date, end_date)
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
-            .limit(num_images)
-            .sort("CLOUDY_PIXEL_PERCENTAGE")
-        )
-
-        try:
-            images = collection.toList(num_images)
-            for i in range(num_images):
-                img = ee.Image(images.get(i))
+        for interval_start, interval_end in intervals:
+            print(f"Tarih: {interval_start} - {interval_end}")
+            
+            collection = (
+                ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                .filterBounds(point)
+                .filterDate(interval_start, interval_end)
+                .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_threshold))
+                .sort("CLOUDY_PIXEL_PERCENTAGE")
+            )
+            
+            
+            try:
+                count = collection.size().getInfo()
+                if count == 0:
+                    print("Görüntü bulunamadı.")
+                    continue
+                
+                img = collection.first()
                 date = img.date().format("YYYY-MM-dd").getInfo()
                 
-                # Özel klasör yapısı: city_images/Istanbul/5km
-                radius_folder = os.path.join(output_folder, 
-                                           f"{city_name}", 
-                                           f"{radius//1000}km")
+                radius_folder = os.path.join(output_folder, city_name, f"{radius//1000}km")
                 os.makedirs(radius_folder, exist_ok=True)
-                
-                output_path = os.path.join(radius_folder, 
-                                         f"{city_name}_{date}_r{radius}m.jpg")
+                output_path = os.path.join(radius_folder, f"{city_name}_{date}_r{radius}m.jpg")
 
-                # Görselleştirme parametreleri
                 vis_params = {
                     'bands': ['B4', 'B3', 'B2'],
                     'min': 0,
@@ -74,27 +84,27 @@ def get_city_images(
                     'gamma': 1.2
                 }
 
-                # Thumbnail URL al
                 thumbnail_url = img.getThumbURL({
                     'region': area,
-                    'scale': 10,
+                    'scale': 20,
                     **vis_params,
                     'format': 'jpg'
                 })
 
-                # İndir ve kaydet
                 response = requests.get(thumbnail_url)
-                Image.open(BytesIO(response.content)).save(output_path)
-                print(f"Kaydedildi: {os.path.basename(output_path)}")
+                if response.status_code == 200:
+                    Image.open(BytesIO(response.content)).save(output_path)
+                    print(f"Kaydedildi: {os.path.basename(output_path)}")
+                else:
+                    print(f"Hata kodu: {response.status_code}")
 
-        except Exception as e:
-            print(f"Hata (r={radius}m): {str(e)}")
+            except Exception as e:
+                print(f"Hata: {str(e)}")
 
 # Örnek Kullanım
 get_city_images(
-    city_name="Istanbul",
+    city_name="Ankara",
     start_radius=5000,
-    end_radius=10000,
-    step=1000,
-    num_images=3
+    end_radius=20000,
+    step=2500
 )
